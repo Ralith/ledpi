@@ -274,6 +274,8 @@ public:
     return uv_udp_recv_start(&handle, allocCB_, recvCB_);
   }
   int recvStop() { return uv_udp_recv_stop(&handle); }
+
+  int set_broadcast(bool state) { return uv_udp_set_broadcast(&handle, state); }
 };
 
 template<typename T>

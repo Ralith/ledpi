@@ -33,15 +33,9 @@ For more information, please refer to <http://unlicense.org/>
 
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <stdarg.h>
-#include <ctype.h>
-#include <syslog.h>
-#include <poll.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <termios.h>
 #include <signal.h>
 #include <errno.h>
@@ -50,7 +44,6 @@ For more information, please refer to <http://unlicense.org/>
 #include <limits.h>
 #include <sys/time.h>
 #include <sys/mman.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 

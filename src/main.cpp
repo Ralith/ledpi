@@ -8,23 +8,21 @@ using namespace common;
 
 namespace {
 
+struct Pin {
+  const char *name;
+  unsigned gpio;
+};
+
+constexpr Pin red{"red", 0};
+constexpr Pin green{"green", 1};
+constexpr Pin blue{"blue", 4};
+constexpr Pin white{"white", 17};
+
+constexpr Pin pins[] = {red, green, blue, white};
+
 struct GPIOGuard {
   ~GPIOGuard() { gpioTerminate(); }
 };
-
-namespace pin {
-
-static constexpr unsigned R = 0, G = 1, B = 4, W = 17;
-
-const char *name[4] = {"red", "green", "blue", "white"};
-unsigned pins[4] = {pin::R, pin::G, pin::B, pin::W};
-
-void init(unsigned pin) {
-  gpioSetMode(pin, PI_OUTPUT);
-  gpioWrite(pin, true);
-}
-
-}
 
 void static_buffer_alloc_cb(size_t, uv_buf_t * buf) {
   constexpr size_t length = 64*1024;
@@ -44,10 +42,10 @@ int main(int argc, char **argv) {
   }
   GPIOGuard guard;
 
-  pin::init(pin::R);
-  pin::init(pin::G);
-  pin::init(pin::B);
-  pin::init(pin::W);
+  for(auto &pin : pins) {
+    gpioSetMode(pin.gpio, PI_OUTPUT);
+    gpioWrite(pin.gpio, true);
+  }
 
   uv::Loop loop;
   uv::UDP udp(loop);
@@ -56,6 +54,7 @@ int main(int argc, char **argv) {
   auto shutdown_cb = [&](int){
     udp.close();
     timer.close();
+
   };
 
   uv::Signal sigint(loop, shutdown_cb, SIGINT);
@@ -82,8 +81,8 @@ int main(int argc, char **argv) {
       }
       printf("set:");
       for(int i = 0; i < 4; ++i) {
-        printf(" %s=%d", pin::name[i], buf->base[i]);
-        gpioPWM(pin::pins[i], buf->base[i]);
+        printf(" %s=%d", pins[i].name, buf->base[i]);
+        gpioPWM(pins[i].gpio, buf->base[i]);
       }
       printf("\n");
     });
@@ -91,9 +90,9 @@ int main(int argc, char **argv) {
   unsigned i = 0;
 
   timer.start([&](){
-      gpioWrite(pin::pins[i], true);
+      gpioWrite(pins[i].gpio, true);
       i = (i + 1) % 4;
-      gpioWrite(pin::pins[i], false);
+      gpioWrite(pins[i].gpio, false);
     },
     0ms, 500ms);
 

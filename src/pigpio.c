@@ -48,7 +48,6 @@ For more information, please refer to <http://unlicense.org/>
 #include <time.h>
 #include <sys/ioctl.h>
 #include <limits.h>
-#include <pthread.h>
 #include <sys/time.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -885,18 +884,6 @@ typedef struct
 
 typedef struct
 {
-   unsigned gpio;
-   pthread_t *pth;
-   callbk_t func;
-   unsigned edge;
-   int timeout;
-   unsigned ex;
-   void *userdata;
-   int inited;
-} gpioISR_t;
-
-typedef struct
-{
    callbk_t func;
    unsigned ex;
    void *userdata;
@@ -909,19 +896,6 @@ typedef struct
    void *userdata;
    uint32_t bits;
 } gpioGetSamples_t;
-
-typedef struct
-{
-   callbk_t func;
-   unsigned ex;
-   void *userdata;
-   unsigned id;
-   unsigned running;
-   unsigned millis;
-   struct timespec nextTick;
-   pthread_t pthId;
-} gpioTimer_t;
-
 
 typedef struct
 {
@@ -1143,8 +1117,6 @@ static volatile uint32_t filterBits  = 0;
 
 static volatile int runState = PI_STARTING;
 
-static gpioISR_t        gpioISR    [PI_MAX_USER_GPIO+1];
-
 static gpioGetSamples_t gpioGetSamples;
 
 static gpioInfo_t       gpioInfo   [PI_MAX_GPIO+1];
@@ -1156,8 +1128,6 @@ static serInfo_t        serInfo    [PI_SER_SLOTS];
 static spiInfo_t        spiInfo    [PI_SPI_SLOTS];
 
 static gpioSignal_t     gpioSignal [PI_MAX_SIGNUM+1];
-
-static gpioTimer_t      gpioTimer  [PI_MAX_TIMER+1];
 
 static int pwmFreq[PWM_FREQS];
 
@@ -4440,56 +4410,6 @@ static void sigSetHandler(void)
 
 /* ======================================================================= */
 
-static void * pthTimerTick(void *x)
-{
-   gpioTimer_t *     tp;
-   struct timespec   req, rem, period;
-   char              buf[256];
-
-   tp = x;
-
-   clock_gettime(CLOCK_REALTIME, &tp->nextTick);
-
-   while (1)
-   {
-      clock_gettime(CLOCK_REALTIME, &rem);
-
-      period.tv_sec  = tp->millis / THOUSAND;
-      period.tv_nsec = (tp->millis % THOUSAND) * THOUSAND * THOUSAND;
-
-      do
-      {
-         TIMER_ADD(&tp->nextTick, &period, &tp->nextTick);
-
-         TIMER_SUB(&tp->nextTick, &rem, &req);
-      }
-      while (req.tv_sec < 0);
-
-      while (nanosleep(&req, &rem))
-      {
-         req.tv_sec  = rem.tv_sec;
-         req.tv_nsec = rem.tv_nsec;
-      }
-
-      if (gpioCfg.dbgLevel >= DBG_SLOW_TICK)
-      {
-         if ((tp->millis > 50) || (gpioCfg.dbgLevel >= DBG_FAST_TICK))
-         {
-            sprintf(buf, "pigpio: TIMER=%d @ %u %u\n",
-               tp->id,
-              (unsigned)tp->nextTick.tv_sec,
-              (unsigned)tp->nextTick.tv_nsec);
-            fprintf(stderr, buf);
-         }
-      }
-
-      if (tp->ex) (tp->func)(tp->userdata);
-      else        (tp->func)();
-   }
-
-   return 0;
-}
-
 static void initCheckLockFile(void)
 {
    int fd;
@@ -5200,12 +5120,6 @@ static void initClearGlobals(void)
       gpioSignal[i].userdata = NULL;
    }
 
-   for (i=0; i<=PI_MAX_TIMER; i++)
-   {
-      gpioTimer[i].running = 0;
-      gpioTimer[i].func    = NULL;
-   }
-
    /* calculate the usable PWM frequencies */
 
    for (i=0; i<PWM_FREQS; i++)
@@ -5246,30 +5160,6 @@ static void initReleaseResources(void)
    int i;
 
    DBG(DBG_STARTUP, "");
-
-   /* shut down running threads */
-
-   for (i=0; i<=PI_MAX_USER_GPIO; i++)
-   {
-      if (gpioISR[i].pth)
-      {
-         /* destroy thread, unexport GPIO */
-
-         gpioSetISRFunc(i, 0, 0, NULL);
-      }
-   }
-
-   for (i=0; i<=PI_MAX_TIMER; i++)
-   {
-      if (gpioTimer[i].running)
-      {
-         /* destroy thread */
-
-         pthread_cancel(gpioTimer[i].pthId);
-         pthread_join(gpioTimer[i].pthId, NULL);
-         gpioTimer[i].running = 0;
-      }
-   }
 
    /* release mmap'd memory */
 
@@ -5392,7 +5282,6 @@ static void initReleaseResources(void)
 int initInitialise(void)
 {
    int rev, i;
-   struct sched_param param;
 
    DBG(DBG_STARTUP, "");
 
@@ -5437,11 +5326,6 @@ int initInitialise(void)
       close(fdMem);
       fdMem = -1;
    }
-
-   param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-
-   if (gpioCfg.internals & PI_CFG_RT_PRIORITY)
-      sched_setscheduler(0, SCHED_FIFO, &param);
 
    initClock(1); /* initialise main clock */
 
@@ -7620,212 +7504,6 @@ int bbI2CZip(
 
 /* ----------------------------------------------------------------------- */
 
-static void *pthISRThread(void *x)
-{
-   gpioISR_t *isr = x;
-   int fd;
-   int retval;
-   uint32_t tick;
-   int level;
-   uint32_t levels;
-   struct pollfd pfd;
-   char buf[64];
-
-   DBG(DBG_USER, "gpio=%d edge=%d timeout=%d f=%x u=%d data=%x",
-      isr->gpio, isr->edge, isr->timeout, (uint32_t)isr->func,
-      isr->ex, (uint32_t)isr->userdata);
-
-   sprintf(buf, "/sys/class/gpio/gpio%d/value", isr->gpio);
-
-   if ((fd = open(buf, O_RDONLY)) < 0)
-   {
-      DBG(DBG_ALWAYS, "gpio %d not exported", isr->gpio);
-      return NULL;
-   }
-
-   pfd.fd = fd;
-
-   pfd.events = POLLPRI;
-
-   lseek(fd, 0, SEEK_SET);    /* consume any prior interrupt */
-   read(fd, buf, sizeof buf);
-
-   while (1)
-   {
-      retval = poll(&pfd, 1, isr->timeout); /* wait for interrupt */
-
-      tick = systReg[SYST_CLO];
-
-      levels = *(gpioReg + GPLEV0);
-
-      if (retval >= 0)
-      {
-         lseek(fd, 0, SEEK_SET);    /* consume interrupt */
-         read(fd, buf, sizeof buf);
-         if (retval)
-         {
-            if (levels & (1<<isr->gpio)) level = PI_ON; else level = PI_OFF;
-         }
-         else level = PI_TIMEOUT;
-
-         if (isr->ex) (isr->func)(isr->gpio, level, tick, isr->userdata);
-         else         (isr->func)(isr->gpio, level, tick);
-      }
-   }
-
-   return NULL;
-}
-
-
-/* ----------------------------------------------------------------------- */
-
-static int intGpioSetISRFunc(
-   unsigned gpio,
-   unsigned edge,
-   int timeout,
-   void *f,
-   int user,
-   void *userdata)
-{
-   char buf[64];
-
-   char *edge_str[]={"rising\n", "falling\n", "both\n"};
-   int fd;
-   int err;
-
-   DBG(DBG_INTERNAL,
-      "gpio=%d edge=%d timeout=%d function=%08X user=%d userdata=%08X",
-      gpio, edge, timeout, (uint32_t)f, user, (uint32_t)userdata);
-
-   if (f)
-   {
-      if (!gpioISR[gpio].inited) /* export gpio if unexported */
-      {
-         fd = open("/sys/class/gpio/export", O_WRONLY);
-         if (fd < 0) return PI_BAD_ISR_INIT;
-
-         /* ignore write fail if already exported */
-         sprintf(buf, "%d\n", gpio);
-         err = write(fd, buf, strlen(buf));
-         close(fd);
-
-         sprintf(buf, "/sys/class/gpio/gpio%d/direction", gpio);
-         fd = open(buf, O_WRONLY);
-         if (fd < 0) return PI_BAD_ISR_INIT;
-
-         err = write(fd, "in\n", 3);
-         close(fd);
-         if (err != 3) return PI_BAD_ISR_INIT;
-
-         gpioISR[gpio].gpio = gpio;
-         gpioISR[gpio].edge = -1;
-         gpioISR[gpio].timeout = -1;
-
-         gpioISR[gpio].inited = 1;
-      }
-
-      if (gpioISR[gpio].edge != edge)
-      {
-         sprintf(buf, "/sys/class/gpio/gpio%d/edge", gpio);
-         fd = open(buf, O_WRONLY);
-         if (fd < 0) return PI_BAD_ISR_INIT;
-
-         err = write(fd, edge_str[edge], strlen(edge_str[edge]));
-         close(fd);
-         if (err != strlen(edge_str[edge])) return PI_BAD_ISR_INIT;
-
-         gpioISR[gpio].edge = edge;
-
-         if (gpioISR[gpio].pth != NULL)
-            pthread_kill(*gpioISR[gpio].pth, SIGCHLD);
-      }
-
-      if (timeout <= 0) timeout = -1;
-      if (gpioISR[gpio].timeout != timeout)
-      {
-         gpioISR[gpio].timeout = timeout;
-
-         if (gpioISR[gpio].pth != NULL)
-            pthread_kill(*gpioISR[gpio].pth, SIGCHLD);
-      }
-
-      gpioISR[gpio].func = f;
-      gpioISR[gpio].ex = user;
-      gpioISR[gpio].userdata = userdata;
-
-      if (gpioISR[gpio].pth == NULL)
-         gpioISR[gpio].pth = gpioStartThread(pthISRThread, &gpioISR[gpio]);
-   }
-   else /* null function, delete ISR, unexport gpio */
-   {
-      if (gpioISR[gpio].pth) /* delete any existing ISR */
-      {
-         gpioStopThread(gpioISR[gpio].pth);
-         gpioISR[gpio].func = NULL;
-         gpioISR[gpio].pth = NULL;
-      }
-
-      if (gpioISR[gpio].inited) /* unexport the gpio */
-      {
-         fd = open("/sys/class/gpio/unexport", O_WRONLY);
-         if (fd < 0) return PI_BAD_ISR_INIT;
-         sprintf(buf, "%d\n", gpio);
-         err = write(fd, buf, strlen(buf));
-         close(fd);
-         if (err != strlen(buf)) return PI_BAD_ISR_INIT;
-         gpioISR[gpio].inited = 0;
-      }
-   }
-
-   return 0;
-}
-
-/* ----------------------------------------------------------------------- */
-
-int gpioSetISRFunc(
-   unsigned gpio,
-   unsigned edge,
-   int timeout,
-   gpioISRFunc_t f)
-{
-   DBG(DBG_USER, "gpio=%d edge=%d timeout=%d function=%08X",
-      gpio, edge, timeout, (uint32_t)f);
-
-   CHECK_INITED;
-
-   if (gpio > PI_MAX_USER_GPIO)
-      SOFT_ERROR(PI_BAD_USER_GPIO, "bad gpio (%d)", gpio);
-
-   if (edge > EITHER_EDGE)
-      SOFT_ERROR(PI_BAD_EDGE, "bad ISR edge (%d)", edge);
-
-   return intGpioSetISRFunc(gpio, edge, timeout, f, 0, NULL);
-}
-
-
-/* ----------------------------------------------------------------------- */
-
-int gpioSetISRFuncEx(
-   unsigned gpio,
-   unsigned edge,
-   int timeout,
-   gpioAlertFuncEx_t f,
-   void *userdata)
-{
-   DBG(DBG_USER, "gpio=%d edge=%d timeout=%d function=%08X userdata=%08X",
-      gpio, edge, timeout, (uint32_t)f, (uint32_t)userdata);
-
-   CHECK_INITED;
-
-   if (gpio > PI_MAX_USER_GPIO)
-      SOFT_ERROR(PI_BAD_USER_GPIO, "bad gpio (%d)", gpio);
-
-   if (edge > EITHER_EDGE)
-      SOFT_ERROR(PI_BAD_EDGE, "bad ISR edge (%d)", edge);
-
-   return intGpioSetISRFunc(gpio, edge, timeout, f, 1, userdata);
-}
-
 static void closeOrphanedNotifications(int slot, int fd)
 {
    int i;
@@ -8117,160 +7795,6 @@ int gpioSetGetSamplesFuncEx(gpioGetSamplesFuncEx_t f,
    return 0;
 }
 
-
-/* ----------------------------------------------------------------------- */
-
-static int intGpioSetTimerFunc(unsigned id,
-                               unsigned millis,
-                               void *f,
-                               int user,
-                               void *userdata)
-{
-   pthread_attr_t pthAttr;
-
-   DBG(DBG_INTERNAL, "id=%d millis=%d function=%08X user=%d userdata=%08X",
-      id, millis, (uint32_t)f, user, (uint32_t)userdata);
-
-   gpioTimer[id].id   = id;
-
-   if (f)
-   {
-      gpioTimer[id].func     = f;
-      gpioTimer[id].ex       = user;
-      gpioTimer[id].userdata = userdata;
-      gpioTimer[id].millis   = millis;
-
-      if (!gpioTimer[id].running)
-      {
-         if (pthread_attr_init(&pthAttr))
-            SOFT_ERROR(PI_TIMER_FAILED,
-               "pthread_attr_init failed (%m)");
-
-         if (pthread_attr_setstacksize(&pthAttr, STACK_SIZE))
-            SOFT_ERROR(PI_TIMER_FAILED,
-               "pthread_attr_setstacksize failed (%m)");
-
-         if (pthread_create(
-            &gpioTimer[id].pthId, &pthAttr, pthTimerTick, &gpioTimer[id]))
-               SOFT_ERROR(PI_TIMER_FAILED,
-                  "timer %d, create failed (%m)", id);
-
-         gpioTimer[id].running = 1;
-      }
-   }
-   else
-   {
-      if (gpioTimer[id].running)
-      {
-         /* destroy thread */
-
-         if (pthread_cancel(gpioTimer[id].pthId))
-            SOFT_ERROR(PI_TIMER_FAILED, "timer %d, cancel failed (%m)", id);
-
-         if (pthread_join(gpioTimer[id].pthId, NULL))
-            SOFT_ERROR(PI_TIMER_FAILED, "timer %d, join failed (%m)", id);
-
-         gpioTimer[id].running = 0;
-         gpioTimer[id].func    = f;
-      }
-   }
-
-   return 0;
-}
-
-
-/* ----------------------------------------------------------------------- */
-
-int gpioSetTimerFunc(unsigned id, unsigned millis, gpioTimerFunc_t f)
-{
-   DBG(DBG_USER, "id=%d millis=%d function=%08X", id, millis, (uint32_t)f);
-
-   CHECK_INITED;
-
-   if (id > PI_MAX_TIMER)
-      SOFT_ERROR(PI_BAD_TIMER, "bad timer id (%d)", id);
-
-   if ((millis < PI_MIN_MS) || (millis > PI_MAX_MS))
-      SOFT_ERROR(PI_BAD_MS, "timer %d, bad millis (%d)", id, millis);
-
-   intGpioSetTimerFunc(id, millis, f, 0, NULL);
-
-   return 0;
-}
-
-
-/* ----------------------------------------------------------------------- */
-
-int gpioSetTimerFuncEx(unsigned id, unsigned millis, gpioTimerFuncEx_t f,
-                       void * userdata)
-{
-   DBG(DBG_USER, "id=%d millis=%d function=%08X, userdata=%08X",
-      id, millis, (uint32_t)f, (uint32_t)userdata);
-
-   CHECK_INITED;
-
-   if (id > PI_MAX_TIMER)
-      SOFT_ERROR(PI_BAD_TIMER, "bad timer id (%d)", id);
-
-   if ((millis < PI_MIN_MS) || (millis > PI_MAX_MS))
-      SOFT_ERROR(PI_BAD_MS, "timer %d, bad millis (%d)", id, millis);
-
-   intGpioSetTimerFunc(id, millis, f, 1, userdata);
-
-   return 0;
-}
-
-/* ----------------------------------------------------------------------- */
-
-pthread_t *gpioStartThread(gpioThreadFunc_t f, void *userdata)
-{
-   pthread_t *pth;
-   pthread_attr_t pthAttr;
-
-   DBG(DBG_USER, "f=%08X, userdata=%08X", (uint32_t)f, (uint32_t)userdata);
-
-   CHECK_INITED_RET_NULL_PTR;
-
-   pth = malloc(sizeof(pthread_t));
-
-   if (pth)
-   {
-      if (pthread_attr_init(&pthAttr))
-      {
-         free(pth);
-         SOFT_ERROR(NULL, "pthread_attr_init failed");
-      }
-
-      if (pthread_attr_setstacksize(&pthAttr, STACK_SIZE))
-      {
-         free(pth);
-         SOFT_ERROR(NULL, "pthread_attr_setstacksize failed");
-      }
-
-      if (pthread_create(pth, &pthAttr, f, userdata))
-      {
-         free(pth);
-         SOFT_ERROR(NULL, "pthread_create failed");
-      }
-   }
-   return pth;
-}
-
-/* ----------------------------------------------------------------------- */
-
-void gpioStopThread(pthread_t *pth)
-{
-   DBG(DBG_USER, "pth=%08X", (uint32_t)pth);
-
-   CHECK_INITED_RET_NIL;
-
-   if (pth)
-   {
-      pthread_cancel(*pth);
-      pthread_join(*pth, NULL);
-      free(pth);
-   }
-}
 
 /* ----------------------------------------------------------------------- */
 

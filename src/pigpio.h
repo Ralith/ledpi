@@ -29,7 +29,6 @@ For more information, please refer to <http://unlicense.org/>
 #define PIGPIO_H
 
 #include <stdint.h>
-#include <pthread.h>
 
 #define PIGPIO_VERSION 43
 
@@ -450,28 +449,6 @@ typedef struct
    uint8_t  *buf;  /* pointer to msg data */
 } pi_i2c_msg_t;
 
-typedef void (*gpioAlertFunc_t)    (int      gpio,
-                                    int      level,
-                                    uint32_t tick);
-
-typedef void (*gpioAlertFuncEx_t)  (int      gpio,
-                                    int      level,
-                                    uint32_t tick,
-                                    void    *userdata);
-
-typedef void (*gpioISRFunc_t)      (int      gpio,
-                                    int      level,
-                                    uint32_t tick);
-
-typedef void (*gpioISRFuncEx_t)    (int      gpio,
-                                    int      level,
-                                    uint32_t tick,
-                                    void    *userdata);
-
-typedef void (*gpioTimerFunc_t)    (void);
-
-typedef void (*gpioTimerFuncEx_t)  (void *userdata);
-
 typedef void (*gpioSignalFunc_t)   (int signum);
 
 typedef void (*gpioSignalFuncEx_t) (int    signum,
@@ -666,11 +643,6 @@ typedef void *(gpioThreadFunc_t) (void *);
 #define PI_MIN_WDOG_TIMEOUT 0
 #define PI_MAX_WDOG_TIMEOUT 60000
 
-/* timer: 0-9 */
-
-#define PI_MIN_TIMER 0
-#define PI_MAX_TIMER 9
-
 /* millis: 10-60000 */
 
 #define PI_MIN_MS 10
@@ -738,16 +710,9 @@ typedef void *(gpioThreadFunc_t) (void *);
 
 #define PI_CFG_DBG_LEVEL         0 /* bits 0-3 */
 #define PI_CFG_ALERT_FREQ        4 /* bits 4-7 */
-#define PI_CFG_RT_PRIORITY       (1<<8)
 #define PI_CFG_STATS             (1<<9)
 
 #define PI_CFG_ILLEGAL_VAL       (1<<10)
-
-/* gpioISR */
-
-#define RISING_EDGE  0
-#define FALLING_EDGE 1
-#define EITHER_EDGE  2
 
 
 /*F*/
@@ -1183,89 +1148,6 @@ user_gpio: 0-31
 
 Returns , 0 (off), 500 (most anti-clockwise) to 2500 (most clockwise)
 if OK, otherwise PI_BAD_USER_GPIO or PI_NOT_SERVO_GPIO.
-D*/
-
-
-/*F*/
-int gpioSetISRFunc(
-   unsigned user_gpio, unsigned edge, int timeout, gpioISRFunc_t f);
-/*D
-Registers a function to be called (a callback) whenever the specified
-gpio interrupt occurs.
-
-. .
-user_gpio: 0-31
-     edge: RISING_EDGE, FALLING_EDGE, or EITHER_EDGE
-  timeout: interrupt timeout in milliseconds (<=0 to cancel)
-        f: the callback function
-. .
-
-Returns 0 if OK, otherwise PI_BAD_USER_GPIO, PI_BAD_EDGE,
-or PI_BAD_ISR_INIT.
-
-One function may be registered per gpio.
-
-The function is passed the gpio, the current level, and the
-current tick.  The level will be PI_TIMEOUT if the optional
-interrupt timeout expires.
-
-The underlying Linux sysfs gpio interface is used to provide
-the interrupt services.
-
-The first time the function is called, with a non-NULL f, the
-gpio is exported, set to be an input, and set to interrupt
-on the given edge and timeout.
-
-Subsequent calls, with a non-NULL f, can vary one or more of the
-edge, timeout, or function.
-
-The ISR may be cancelled by passing a NULL f, in which case the
-gpio is unexported.
-
-The tick is that read at the time the process was informed of
-the interrupt.  This will be a variable number of microseconds
-after the interrupt occurred.  Typically the latency will be of
-the order of 50 microseconds.  The latency is not guaranteed
-and will vary with system load.
-
-The level is that read at the time the process was informed of
-the interrupt, or PI_TIMEOUT if the optional interrupt timeout
-expired.  It may not be the same as the expected edge as
-interrupts happening in rapid succession may be missed by the
-kernel (i.e. this mechanism can not be used to capture several
-interrupts only a few microseconds apart).
-D*/
-
-
-/*F*/
-int gpioSetISRFuncEx(
-   unsigned user_gpio,
-   unsigned edge,
-   int timeout,
-   gpioISRFuncEx_t f,
-   void *userdata);
-/*D
-Registers a function to be called (a callback) whenever the specified
-gpio interrupt occurs.
-
-. .
-user_gpio: 0-31
-     edge: RISING_EDGE, FALLING_EDGE, or EITHER_EDGE
-  timeout: interrupt timeout in milliseconds (<=0 to cancel)
-        f: the callback function
- userdata: pointer to arbitrary user data
-. .
-
-Returns 0 if OK, otherwise PI_BAD_USER_GPIO, PI_BAD_EDGE,
-or PI_BAD_ISR_INIT.
-
-The function is passed the gpio, the current level, the
-current tick, and the userdata pointer.
-
-Only one of [*gpioSetISRFunc*] or [*gpioSetISRFuncEx*] can be
-registered per gpio.
-
-See [*gpioSetISRFunc*] for further details.
 D*/
 
 
@@ -2747,129 +2629,6 @@ registered.
 See [*gpioSetGetSamplesFunc*] for further details.
 D*/
 
-
-/*F*/
-int gpioSetTimerFunc(unsigned timer, unsigned millis, gpioTimerFunc_t f);
-/*D
-Registers a function to be called (a callback) every millis milliseconds.
-
-. .
- timer: 0-9
-millis: 10-60000
-     f: the function to call
-. .
-
-Returns 0 if OK, otherwise PI_BAD_TIMER, PI_BAD_MS, or PI_TIMER_FAILED.
-
-10 timers are supported numbered 0 to 9.
-
-One function may be registered per timer.
-
-The timer may be cancelled by passing NULL as the function.
-
-...
-void bFunction(void)
-{
-   printf("two seconds have elapsed\n");
-}
-
-// call bFunction every 2000 milliseconds
-gpioSetTimerFunc(0, 2000, bFunction);
-...
-D*/
-
-
-/*F*/
-int gpioSetTimerFuncEx(
-   unsigned timer, unsigned millis, gpioTimerFuncEx_t f, void *userdata);
-/*D
-Registers a function to be called (a callback) every millis milliseconds.
-
-. .
-   timer: 0-9.
-  millis: 10-60000
-       f: the function to call
-userdata: a pointer to arbitrary user data
-. .
-
-Returns 0 if OK, otherwise PI_BAD_TIMER, PI_BAD_MS, or PI_TIMER_FAILED.
-
-The function is passed the userdata pointer.
-
-Only one of [*gpioSetTimerFunc*] or [*gpioSetTimerFuncEx*] can be
-registered per timer.
-
-See [*gpioSetTimerFunc*] for further details.
-D*/
-
-
-/*F*/
-pthread_t *gpioStartThread(gpioThreadFunc_t f, void *userdata);
-/*D
-Starts a new thread of execution with f as the main routine.
-
-. .
-       f: the main function for the new thread
-userdata: a pointer to arbitrary user data
-. .
-
-Returns a pointer to pthread_t if OK, otherwise NULL.
-
-The function is passed the single argument arg.
-
-The thread can be cancelled by passing the pointer to pthread_t to
-[*gpioStopThread*].
-
-...
-#include <stdio.h>
-#include <pigpio.h>
-
-void *myfunc(void *arg)
-{
-   while (1)
-   {
-      printf("%s\n", arg);
-      sleep(1);
-   }
-}
-
-int main(int argc, char *argv[])
-{
-   pthread_t *p1, *p2, *p3;
-
-   if (gpioInitialise() < 0) return 1;
-
-   p1 = gpioStartThread(myfunc, "thread 1"); sleep(3);
-
-   p2 = gpioStartThread(myfunc, "thread 2"); sleep(3);
-
-   p3 = gpioStartThread(myfunc, "thread 3"); sleep(3);
-
-   gpioStopThread(p3); sleep(3);
-
-   gpioStopThread(p2); sleep(3);
-
-   gpioStopThread(p1); sleep(3);
-
-   gpioTerminate();
-}
-...
-D*/
-
-
-/*F*/
-void gpioStopThread(pthread_t *pth);
-/*D
-Cancels the thread pointed at by pth.
-
-. .
-pth: a thread pointer returned by [*gpioStartThread*]
-. .
-
-No value is returned.
-
-The thread to be stopped should have been started with [*gpioStartThread*].
-D*/
 
 /*F*/
 int gpioSetSignalFunc(unsigned signum, gpioSignalFunc_t f);

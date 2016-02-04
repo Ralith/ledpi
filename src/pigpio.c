@@ -1183,9 +1183,6 @@ static volatile gpioCfg_t gpioCfg =
 static unsigned bufferBlocks; /* number of blocks in buffer */
 static unsigned bufferCycles; /* number of cycles */
 
-static gpioSample_t gpioSample[DATUMS];
-static gpioReport_t gpioReport[DATUMS];
-
 static uint32_t spi_dummy;
 
 static unsigned old_mode_ce0;
@@ -1298,10 +1295,6 @@ static const uint16_t pwmRealRange[PWM_FREQS]=
 /* prototype ----------------------------------------------------- */
 
 static void intNotifyBits(void);
-
-static void intScriptBits(void);
-
-static int  gpioNotifyOpenInBand(int fd);
 
 static void initHWClk
    (int clkCtl, int clkDiv, int clkSrc, int divI, int divF, int MASH);
@@ -1479,20 +1472,6 @@ static void myTckPageSlot(int pos, int * page, int * slot)
 
 /* ----------------------------------------------------------------------- */
 
-static uint32_t myGetLevel(int pos)
-{
-   uint32_t level;
-   int page, slot;
-
-   myLvsPageSlot(pos, &page, &slot);
-
-   level = dmaIVirt[page]->level[slot];
-
-   return level;
-}
-
-/* ----------------------------------------------------------------------- */
-
 static int myI2CGetPar(char *inBuf, int *inPos, int inLen, int *esc)
 {
    int bytes;
@@ -1518,28 +1497,6 @@ static int myI2CGetPar(char *inBuf, int *inPos, int inLen, int *esc)
 
 /* ----------------------------------------------------------------------- */
 
-static uint32_t myGetTick(int pos)
-{
-   uint32_t tick;
-   int page, slot;
-
-   myTckPageSlot(pos, &page, &slot);
-
-   tick = dmaIVirt[page]->tick[slot];
-
-   return tick;
-}
-
-static int myPermit(unsigned gpio)
-{
-   if (gpio <= PI_MAX_GPIO)
-   {
-      if (gpioMask & ((uint64_t)(1)<<gpio)) return 1;
-      else return 0;
-   }
-   return 1; /* will fail for bad gpio number */
-}
-
 static void flushMemory(void)
 {
    static int val = 0;
@@ -1561,17 +1518,6 @@ static void flushMemory(void)
       memset(dummy, val++, (FLUSH_PAGES*PAGE_SIZE));
       memset(dummy, val++, (FLUSH_PAGES*PAGE_SIZE));
       munmap(dummy, FLUSH_PAGES*PAGE_SIZE);
-   }
-}
-
-/* ----------------------------------------------------------------------- */
-
-static void spinWhileStarting(void)
-{
-   while (runState == PI_STARTING)
-   {
-      if (piModel == 1) myGpioDelay(1000);
-      else flushMemory();
    }
 }
 
@@ -4037,50 +3983,6 @@ static void dmaCbPrint(int pos)
 
 /* ----------------------------------------------------------------------- */
 
-static unsigned dmaNowAtICB(void)
-{
-   unsigned cb;
-   static unsigned lastPage=0;
-   unsigned page;
-   uint32_t cbAddr;
-   uint32_t startTick, endTick;
-
-   startTick = systReg[SYST_CLO];
-
-   cbAddr = dmaIn[DMA_CONBLK_AD];
-
-   page = lastPage;
-
-   /* which page are we dma'ing? */
-
-   while (1)
-   {
-      cb = (cbAddr - ((int)dmaIBus[page])) / 32;
-
-      if (cb < CBS_PER_IPAGE)
-      {
-         endTick = systReg[SYST_CLO];
-
-         if (endTick != startTick)
-            gpioStats.cbTicks += (endTick - startTick);
-
-         gpioStats.cbCalls++;
-
-         lastPage = page;
-
-         return (page*CBS_PER_IPAGE) + cb;
-      }
-
-      if (page++ >= DMAI_PAGES) page=0;
-
-      if (page == lastPage) break;
-   }
-
-   return 0;
-}
-
-/* ----------------------------------------------------------------------- */
-
 unsigned rawWaveCB(void)
 {
    unsigned cb;
@@ -4113,20 +4015,6 @@ unsigned rawWaveCB(void)
    }
 
    return 0;
-}
-
-/* ----------------------------------------------------------------------- */
-
-static unsigned dmaCurrentSlot(unsigned pos)
-{
-   unsigned cycle=0, slot=0, tmp;
-
-   cycle = (pos/CBS_PER_CYCLE);
-   tmp   = (pos%CBS_PER_CYCLE);
-
-   if (tmp > 2) slot = ((tmp-2)/3);
-
-   return (cycle*PULSE_PER_CYCLE)+slot;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -5274,7 +5162,7 @@ static void initReleaseResources(void)
 
 int initInitialise(void)
 {
-   int rev, i;
+   int rev;
 
    DBG(DBG_STARTUP, "");
 
@@ -7581,43 +7469,6 @@ int gpioNotifyOpen(void)
 {
    return gpioNotifyOpenWithSize(0);
 }
-
-/* ----------------------------------------------------------------------- */
-
-static int gpioNotifyOpenInBand(int fd)
-{
-   int i, slot;
-
-   DBG(DBG_USER, "fd=%d", fd);
-
-   CHECK_INITED;
-
-   slot = -1;
-
-   for (i=0; i<PI_NOTIFY_SLOTS; i++)
-   {
-      if (gpioNotify[i].state == PI_NOTIFY_CLOSED)
-      {
-         slot = i;
-         break;
-      }
-   }
-
-   if (slot < 0) SOFT_ERROR(PI_NO_HANDLE, "no handle");
-
-   gpioNotify[slot].state = PI_NOTIFY_OPENED;
-   gpioNotify[slot].seqno = 0;
-   gpioNotify[slot].bits  = 0;
-   gpioNotify[slot].fd    = fd;
-   gpioNotify[slot].pipe  = 0;
-   gpioNotify[slot].max_emits  = MAX_EMITS;
-   gpioNotify[slot].lastReportTick = gpioTick();
-
-   closeOrphanedNotifications(slot, fd);
-
-   return slot;
-}
-
 
 /* ----------------------------------------------------------------------- */
 

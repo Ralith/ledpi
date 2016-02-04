@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
       i = (i + 1) % 4;
       gpioWrite(pin::pins[i], false);
     },
-    0ms, 10ms);
+    0ms, 500ms);
 
   loop.run();
 

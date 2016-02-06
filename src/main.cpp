@@ -1,12 +1,17 @@
 #include <cstdio>
 
+#include <capnp/serialize.h>
+
 #include "pigpio.h"
 #include "Uv.h"
+#include "command.capnp.h"
 #include "state.capnp.h"
 
 using namespace common;
 
 namespace {
+
+constexpr size_t N_CHANNELS = 4;
 
 struct Pin {
   const char *name;
@@ -18,7 +23,7 @@ constexpr Pin green{"green", 1};
 constexpr Pin blue{"blue", 4};
 constexpr Pin white{"white", 17};
 
-constexpr Pin pins[] = {red, green, blue, white};
+constexpr Pin pins[N_CHANNELS] = {red, green, blue, white};
 
 struct GPIOGuard {
   ~GPIOGuard() { gpioTerminate(); }
@@ -35,12 +40,12 @@ using Power = uint16_t;
 constexpr Power POWER_MAX = PI_MAX_DUTYCYCLE_RANGE;
 
 struct State {
-  Power power[4];
+  Power power[N_CHANNELS];
 };
 
 void apply(const State &state) {
   printf("set:");
-  for(int i = 0; i < 4; ++i) {
+  for(size_t i = 0; i < N_CHANNELS; ++i) {
     printf(" %s=%d", pins[i].name, state.power[i]);
     gpioPWM(pins[i].gpio, POWER_MAX - state.power[i]);
   }
@@ -73,6 +78,10 @@ int main(int, char **) {
 
   auto shutdown_cb = [&](int){
     udp.close();
+    for(auto &x : state.power) {
+      x = 0;
+    }
+    apply(state);
   };
 
   uv::Signal sigint(loop, shutdown_cb, SIGINT);
@@ -91,16 +100,44 @@ int main(int, char **) {
         return;
       }
 
-      if(result != 4) {
-        if(cAddr != nullptr) {
-          fprintf(stderr, "illegal %zd-byte command received\n", result);
-        }
+      if(result == 0 && cAddr == nullptr)
         return;
+
+      if(result % sizeof(capnp::word)) {
+        fprintf(stderr, "malformed message: size %zu not a multiple of %zu\n", result, sizeof(capnp::word));
       }
-      for(int i = 0; i < 4; ++i) {
-        state.power[i] = (buf->base[i] * POWER_MAX) / 255;
+
+      capnp::SegmentArrayMessageReader reader({kj::arrayPtr(reinterpret_cast<const capnp::word*>(buf->base),
+                                                            buf->len/sizeof(capnp::word))});
+
+      try {
+        auto msg = reader.getRoot<proto::Command>();
+        switch(msg.which()) {
+        case proto::Command::SET_POWER:
+          for(auto instr : msg.getSetPower()) {
+            size_t channel = instr.getChannel();
+            if(channel > 4) {
+              printf("message attempted to modify nonexistent channel %zu\n", channel);
+              continue;
+            }
+            switch(instr.which()) {
+            case proto::Command::SetPower::SET:
+              state.power[channel] = POWER_MAX * instr.getSet() / UINT16_MAX;
+              break;
+            case proto::Command::SetPower::MULTIPLY:
+              state.power[channel] *= std::max(static_cast<float>(0), std::min(static_cast<float>(POWER_MAX), instr.getMultiply()));
+              break;
+            }
+          }
+          apply(state);
+          break;
+        default:
+          puts("unimplemented command");
+          break;
+        }
+      } catch(kj::Exception & e) {
+        printf("malformed message: %s\n", e.getDescription().cStr());
       }
-      apply(state);
     });
 
   loop.run();

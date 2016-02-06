@@ -1,7 +1,11 @@
 #include <cstdio>
 #include <cstring>
+#include <vector>
+
+#include <capnp/message.h>
 
 #include "Uv.h"
+#include "command.capnp.h"
 
 using namespace common;
 
@@ -13,10 +17,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  char data[4];
-  uv_buf_t buf;
-  buf.base = data;
-  buf.len = sizeof(data);
+  capnp::MallocMessageBuilder message;
+  auto cmd = message.initRoot<proto::Command>();
+  auto levels = cmd.initSetPower(4);
 
   for(int i = 0; i < 4; ++i) {
     char *endptr;
@@ -32,7 +35,15 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    data[i] = x * 255;
+    levels[i].setChannel(i);
+    levels[i].setSet(x * UINT16_MAX);
+  }
+
+  auto segments = message.getSegmentsForOutput();
+  std::vector<uv_buf_t> bufs(segments.size());
+  for(size_t i = 0; i < segments.size(); ++i) {
+    bufs[i].len = segments[i].size() * sizeof(segments[i][0]);
+    bufs[i].base = const_cast<char*>(reinterpret_cast<const char*>(segments[i].begin()));
   }
 
   uv::Loop loop;
@@ -48,7 +59,7 @@ int main(int argc, char **argv) {
   uv_ip4_addr("255.255.255.255", 4242, &remoteAddr);
 
   int rc = 0;
-  send.send(udp, &buf, 1, reinterpret_cast<struct sockaddr *>(&remoteAddr), [&](int result){
+  send.send(udp, &bufs[0], bufs.size(), reinterpret_cast<struct sockaddr *>(&remoteAddr), [&](int result){
       if(result < 0) {
         fprintf(stderr, "failed to send command: %s\n", uv_strerror(result));
         rc = 1;

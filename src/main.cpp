@@ -1,8 +1,8 @@
 #include <cstdio>
-#include <limits>
 
 #include "pigpio.h"
 #include "Uv.h"
+#include "state.capnp.h"
 
 using namespace common;
 
@@ -31,17 +31,20 @@ void static_buffer_alloc_cb(size_t, uv_buf_t * buf) {
   buf->len = length;
 }
 
-using Power = uint8_t;
-constexpr Power POWER_MAX = std::numeric_limits<Power>::max();
+using Power = uint16_t;
+constexpr Power POWER_MAX = PI_MAX_DUTYCYCLE_RANGE;
 
 struct State {
   Power power[4];
 };
 
 void apply(const State &state) {
+  printf("set:");
   for(int i = 0; i < 4; ++i) {
+    printf(" %s=%d", pins[i].name, state.power[i]);
     gpioPWM(pins[i].gpio, POWER_MAX - state.power[i]);
   }
+  printf("\n");
 }
 
 }
@@ -53,10 +56,12 @@ int main(int, char **) {
   }
   GPIOGuard guard;
 
+
   // Init and shut off all channels
   for(auto &pin : pins) {
     gpioSetMode(pin.gpio, PI_OUTPUT);
     gpioWrite(pin.gpio, true);
+    gpioSetPWMrange(pin.gpio, POWER_MAX);
   }
 
   // Default warm white
@@ -75,7 +80,7 @@ int main(int, char **) {
   uv::Signal sigterm(loop, shutdown_cb, SIGTERM);
   sigterm.unref();
 
-  struct sockaddr_in6 addr {};
+  struct sockaddr_in6 addr;
   uv_ip6_addr("::", 4242, &addr);
   udp.bind(reinterpret_cast<struct sockaddr *>(&addr));
   udp.recvStart(static_buffer_alloc_cb, [&](ssize_t result, const uv_buf_t *buf, const struct sockaddr *cAddr, unsigned flags) {
@@ -92,13 +97,10 @@ int main(int, char **) {
         }
         return;
       }
-      printf("set:");
       for(int i = 0; i < 4; ++i) {
-        printf(" %s=%d", pins[i].name, buf->base[i]);
-        state.power[i] = POWER_MAX - buf->base[i];
+        state.power[i] = (buf->base[i] * POWER_MAX) / 255;
       }
       apply(state);
-      printf("\n");
     });
 
   loop.run();

@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
+#include <memory>
 
 #include <capnp/serialize.h>
 #include <capnp/serialize-packed.h>
@@ -59,10 +60,24 @@ int main(int, char **) {
   uv_ip6_addr("::", 4242, &addr);
   udp.bind(reinterpret_cast<struct sockaddr *>(&addr));
 
+  printf("loading state...");
+  fflush(stdout);
+
   int state_fd = open(STATE_PATH, O_RDONLY);
   if(state_fd < 0) {
+    if(errno == ENOENT) {
+      state_fd = open(TMP_STATE_PATH, O_RDONLY);
+      if(state_fd >= 0) {
+        int res = rename(TMP_STATE_PATH, STATE_PATH);
+        if(res >= 0) goto success;
+      }
+    }
+
     fprintf(stderr, "failed to open state file at %s: %s\n", STATE_PATH, strerror(errno));
     return 1;
+
+  success:
+    (void)0;
   }
 
   capnp::MallocMessageBuilder state_builder;
@@ -71,14 +86,17 @@ int main(int, char **) {
     capnp::PackedFdMessageReader reader{kj::AutoCloseFd(state_fd)};
     state_builder.setRoot(reader.getRoot<proto::State>());
   } catch(kj::Exception & e) {
-    printf("failed to load state file: %s\n", e.getDescription().cStr());
+    fprintf(stderr, "failed to load state file: %s\n", e.getDescription().cStr());
+    return 1;
   }
 
   auto state = state_builder.getRoot<proto::State>();
+  puts(" done");
 
   // Set up PWM outputs
   for(auto channel : state.getChannels()) {
     gpioSetPWMrange(channel.getGpio(), PI_MAX_DUTYCYCLE_RANGE);
+    gpioPWM(channel.getGpio(), PI_MAX_DUTYCYCLE_RANGE);
   }
 
   apply(state);
@@ -143,8 +161,35 @@ int main(int, char **) {
           }
           apply(state);
           break;
+
+        case proto::Command::SET_NAME:
+          state.setName(msg.getSetName());
+          break;
+
+        case proto::Command::GET_NAME: {
+          auto response_builder = std::make_shared<capnp::MallocMessageBuilder>();
+          auto response_msg = response_builder->initRoot<proto::Response>();
+          response_msg.setName(state.getName().asString());
+
+          auto send_req = std::make_shared<uv::UDPSend>();
+          auto segs = response_builder->getSegmentsForOutput();
+          std::vector<uv_buf_t> bufs(segs.size());
+          for(size_t i = 0; i < segs.size(); ++i) {
+            bufs[i].base = const_cast<char*>(reinterpret_cast<const char*>(segs[i].begin()));
+            bufs[i].len = sizeof(segs[i]) * segs[i].size();
+          }
+          send_req->send(udp, &bufs[0], bufs.size(), cAddr,
+                         [response_builder, send_req](int result) {
+                           if(result < 0) {
+                             fprintf(stderr, "error sending response: %s\n", uv_strerror(result));
+                           }
+                         });
+
+          break;
+        }
+
         default:
-          puts("unimplemented command");
+          puts("unsupported command");
           break;
         }
       } catch(kj::Exception & e) {
@@ -161,7 +206,8 @@ int main(int, char **) {
   loop.run();
 
   // Save state
-  printf("saving state\n");
+  printf("saving state...");
+  fflush(stdout);
   state_fd = open(TMP_STATE_PATH, O_WRONLY | O_CREAT);
   if(state_fd < 0) {
     fprintf(stderr, "failed to open state file at %s: %s\n", TMP_STATE_PATH, strerror(errno));
@@ -175,4 +221,5 @@ int main(int, char **) {
     fprintf(stderr, "failed to store state file to %s: %s\n", STATE_PATH, strerror(errno));
     return 1;
   }
+  puts(" done");
 }

@@ -3,14 +3,11 @@
 using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("proto");
 
+using import "common.capnp".Channel;
+
 using ChannelID = UInt32;
 
 using RelativePower = UInt16;
-
-struct PowerState {
-  channel @0 :ChannelID;
-  value @1 :RelativePower;
-}
 
 struct Command {
   struct SetPower {
@@ -24,13 +21,23 @@ struct Command {
   union {
     setPower @0 :List(SetPower);
     getPower @1 :Void;
-    # response: List(PowerState)
 
     setName @2 :Text;
     getName @3 :Void;
-    # response: Text
 
     getChannels @4 :Void;
-    # response: List(Channel)
+  }
+}
+
+struct Response {
+  struct Power {
+    channel @0 :ChannelID;
+    value @1 :RelativePower;
+  }
+
+  union {
+    power @0 :List(Power);
+    name @1 :Text;
+    channels @2 :List(Channel);
   }
 }

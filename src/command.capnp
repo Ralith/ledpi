@@ -30,7 +30,7 @@ struct Command {
     getName @3 :Void;
     # response: Text
 
-    getChannels @4 :List(List(Float32));
-    # 60 5nm buckets from 400nm to 700nm
+    getChannels @4 :Void;
+    # response: List(Channel)
   }
 }

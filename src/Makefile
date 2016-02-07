@@ -3,8 +3,8 @@ CXX = g++
 CCFLAGS = -Wall -Wextra -pedantic
 CXXFLAGS = -std=c++14
 
-LEDPI_OBJS = main.o pigpio.o Uv.o command.capnp.o state.capnp.o
-LEDCTL_OBJS = control.o Uv.o command.capnp.o
+LEDPI_OBJS = main.o pigpio.o Uv.o command.capnp.o state.capnp.o common.capnp.o
+LEDCTL_OBJS = control.o Uv.o command.capnp.o common.capnp.o
 
 all: ledpi ledctl
 
@@ -34,7 +34,7 @@ ledctl: $(LEDCTL_OBJS)
 %.capnp.c++ %.capnp.h: %.capnp
 	capnpc -oc++ $<
 
-generated_headers: command.capnp.h state.capnp.h
+generated_headers: command.capnp.h state.capnp.h common.capnp.h
 
 clean:
 	rm -f ledpi ledctl *.o *.d *.capnp.c++ *.capnp.h

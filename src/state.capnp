@@ -3,15 +3,7 @@
 using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("proto");
 
-struct Channel {
-  name @0 :Text;
-
-  gpio @1 :UInt16;
-  # pin
-
-  spectra @2 :List(Float32);
-  # 60 5-nm buckets from 400 to 700
-}
+using import "common.capnp".Channel;
 
 struct State {
   channels @0 :List(Channel);

@@ -13,7 +13,7 @@ constexpr const char* channels[] = {"red", "green", "blue", "white"};
 
 int main(int argc, char **argv) {
   if(argc != 5) {
-    fprintf(stderr, "specify intensity scale for each channel\n");
+    fprintf(stderr, "Usage: %s <channel>{4}\n\tchannel = real | \"x\" real\n", argv[0]);
     return 1;
   }
 
@@ -22,21 +22,33 @@ int main(int argc, char **argv) {
   auto levels = cmd.initSetPower(4);
 
   for(int i = 0; i < 4; ++i) {
-    char *endptr;
-    float x = strtof(argv[i+1], &endptr);
+    const char *arg = argv[i+1];
 
-    if(endptr != argv[i+1] + strlen(argv[i+1])) {
-      fprintf(stderr, "invalid %s channel intensity (should be a real): %s\n", channels[i], argv[i+1]);
+    bool multiply = false;
+    if(arg[0] == 'x') {
+      multiply = true;
+      arg += 1;
+    }
+
+    char *endptr;
+    float x = strtof(arg, &endptr);
+
+    if(endptr != arg + strlen(arg)) {
+      fprintf(stderr, "invalid %s channel intensity (should be a real): %s\n", channels[i], arg);
       return 1;
     }
 
-    if(x < 0 || x > 1) {
-      fprintf(stderr, "invalid %s channel intensity (should be between 0 and 1 inclusive): %s\n", channels[i], argv[i+1]);
+    if(!multiply && (x < 0 || x > 1)) {
+      fprintf(stderr, "invalid %s channel absolute intensity (should be between 0 and 1 inclusive): %s\n", channels[i], arg);
       return 1;
     }
 
     levels[i].setChannel(i);
-    levels[i].setSet(x * UINT16_MAX);
+    if(multiply) {
+      levels[i].setMultiply(x);
+    } else {
+      levels[i].setSet(x * UINT16_MAX);
+    }
   }
 
   auto segments = message.getSegmentsForOutput();

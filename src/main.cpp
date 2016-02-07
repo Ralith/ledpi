@@ -1,6 +1,11 @@
 #include <cstdio>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
 
 #include <capnp/serialize.h>
+#include <capnp/serialize-packed.h>
 
 #include "pigpio.h"
 #include "Uv.h"
@@ -11,19 +16,8 @@ using namespace common;
 
 namespace {
 
-constexpr size_t N_CHANNELS = 4;
-
-struct Pin {
-  const char *name;
-  unsigned gpio;
-};
-
-constexpr Pin red{"red", 0};
-constexpr Pin green{"green", 1};
-constexpr Pin blue{"blue", 4};
-constexpr Pin white{"white", 17};
-
-constexpr Pin pins[N_CHANNELS] = {red, green, blue, white};
+const char *STATE_PATH = "/var/lib/ledpi-state";
+const char *TMP_STATE_PATH = "/var/lib/ledpi-state.tmp";
 
 struct GPIOGuard {
   ~GPIOGuard() { gpioTerminate(); }
@@ -37,17 +31,14 @@ void static_buffer_alloc_cb(size_t, uv_buf_t * buf) {
 }
 
 using Power = uint16_t;
-constexpr Power POWER_MAX = PI_MAX_DUTYCYCLE_RANGE;
 
-struct State {
-  Power power[N_CHANNELS];
-};
-
-void apply(const State &state) {
+void apply(proto::State::Builder state) {
+  auto levels = state.getLevels();
+  auto channels = state.getChannels();
   printf("set:");
-  for(size_t i = 0; i < N_CHANNELS; ++i) {
-    printf(" %s=%d", pins[i].name, state.power[i]);
-    gpioPWM(pins[i].gpio, POWER_MAX - state.power[i]);
+  for(size_t i = 0; i < levels.size(); ++i) {
+    printf(" %s=%d", channels[i].getName().cStr(), levels[i]);
+    gpioPWM(channels[i].getGpio(), (static_cast<uint32_t>(UINT16_MAX - levels[i]) * PI_MAX_DUTYCYCLE_RANGE) / UINT16_MAX);
   }
   printf("\n");
 }
@@ -61,27 +52,51 @@ int main(int, char **) {
   }
   GPIOGuard guard;
 
-
-  // Init and shut off all channels
-  for(auto &pin : pins) {
-    gpioSetMode(pin.gpio, PI_OUTPUT);
-    gpioWrite(pin.gpio, true);
-    gpioSetPWMrange(pin.gpio, POWER_MAX);
-  }
-
-  // Default warm white
-  State state = {{POWER_MAX, POWER_MAX / 10, 0, POWER_MAX / 4}};
-  apply(state);
-
   uv::Loop loop;
   uv::UDP udp(loop);
 
+  struct sockaddr_in6 addr;
+  uv_ip6_addr("::", 4242, &addr);
+  udp.bind(reinterpret_cast<struct sockaddr *>(&addr));
+
+  int state_fd = open(STATE_PATH, O_RDONLY);
+  if(state_fd < 0) {
+    fprintf(stderr, "failed to open state file at %s: %s\n", STATE_PATH, strerror(errno));
+    return 1;
+  }
+
+  capnp::MallocMessageBuilder state_builder;
+
+  try {
+    capnp::PackedFdMessageReader reader{kj::AutoCloseFd(state_fd)};
+    state_builder.setRoot(reader.getRoot<proto::State>());
+  } catch(kj::Exception & e) {
+    printf("failed to load state file: %s\n", e.getDescription().cStr());
+  }
+
+  auto state = state_builder.getRoot<proto::State>();
+
+  // Set up PWM outputs
+  for(auto channel : state.getChannels()) {
+    gpioSetPWMrange(channel.getGpio(), PI_MAX_DUTYCYCLE_RANGE);
+  }
+
+  apply(state);
+
   auto shutdown_cb = [&](int){
     udp.close();
-    for(auto &x : state.power) {
-      x = 0;
+
+    // Shut off LEDs
+    auto levels = state.getLevels();
+    std::vector<Power> old_levels(levels.size());
+    for(size_t i = 0; i < levels.size(); ++i) {
+      old_levels[i] = levels[i];
+      levels.set(i, 0);
     }
     apply(state);
+    for(size_t i = 0; i < levels.size(); ++i) {
+      levels.set(i, old_levels[i]);
+    }
   };
 
   uv::Signal sigint(loop, shutdown_cb, SIGINT);
@@ -89,9 +104,6 @@ int main(int, char **) {
   uv::Signal sigterm(loop, shutdown_cb, SIGTERM);
   sigterm.unref();
 
-  struct sockaddr_in6 addr;
-  uv_ip6_addr("::", 4242, &addr);
-  udp.bind(reinterpret_cast<struct sockaddr *>(&addr));
   udp.recvStart(static_buffer_alloc_cb, [&](ssize_t result, const uv_buf_t *buf, const struct sockaddr *cAddr, unsigned flags) {
       (void)flags;
       if(result < 0) {
@@ -122,10 +134,10 @@ int main(int, char **) {
             }
             switch(instr.which()) {
             case proto::Command::SetPower::SET:
-              state.power[channel] = POWER_MAX * instr.getSet() / UINT16_MAX;
+              state.getLevels().set(channel, instr.getSet());
               break;
             case proto::Command::SetPower::MULTIPLY:
-              state.power[channel] *= std::max(static_cast<float>(0), std::min(static_cast<float>(POWER_MAX), instr.getMultiply()));
+              state.getLevels().set(channel, state.getLevels()[channel] * instr.getMultiply());
               break;
             }
           }
@@ -147,4 +159,20 @@ int main(int, char **) {
 
   // Cleanup iteration
   loop.run();
+
+  // Save state
+  printf("saving state\n");
+  state_fd = open(TMP_STATE_PATH, O_WRONLY | O_CREAT);
+  if(state_fd < 0) {
+    fprintf(stderr, "failed to open state file at %s: %s\n", TMP_STATE_PATH, strerror(errno));
+    return 1;
+  }
+  capnp::writePackedMessageToFd(state_fd, state_builder);
+  fsync(state_fd);
+  close(state_fd);
+  int res = rename(TMP_STATE_PATH, STATE_PATH);
+  if(res < 0) {
+    fprintf(stderr, "failed to store state file to %s: %s\n", STATE_PATH, strerror(errno));
+    return 1;
+  }
 }

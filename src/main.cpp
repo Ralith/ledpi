@@ -33,7 +33,7 @@ void static_buffer_alloc_cb(size_t, uv_buf_t * buf) {
 
 using Power = uint16_t;
 
-void apply(proto::State::Builder state) {
+void apply(proto::State::Reader state) {
   auto levels = state.getLevels();
   auto channels = state.getChannels();
   printf("set:");
@@ -70,6 +70,7 @@ int main(int, char **) {
       if(state_fd >= 0) {
         int res = rename(TMP_STATE_PATH, STATE_PATH);
         if(res >= 0) goto success;
+        else close(state_fd);
       }
     }
 
@@ -91,6 +92,11 @@ int main(int, char **) {
   }
 
   auto state = state_builder.getRoot<proto::State>();
+
+  if(state.getChannels().size() != state.getLevels().size()) {
+    state.initLevels(state.getChannels().size());
+  }
+
   puts(" done");
 
   // Set up PWM outputs
